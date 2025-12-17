@@ -1,18 +1,16 @@
 #!/bin/bash
 
 # Settings
-MODEL="pointtransformer38" # Options: pointtransformer38, pointtransformer50
+MODEL="pointtransformer38"
 GPU_ID=0
 BATCH_SIZE=16
 EPOCHS=150
 
 echo "Starting training for $MODEL on GPU $GPU_ID..."
 
-# Make sure data link exists
 if [ ! -d "data" ]; then
   mkdir -p data
-  # Assuming dataset_root is available in environment or hardcoded
-  # ln -sfn /path/to/dataset data/modelnet40_normal_resampled
+
 fi
 
 python train.py \
@@ -27,6 +25,6 @@ python train.py \
     --weight_decay 5e-4 \
     --gpu $GPU_ID \
     --checkpoint_dir "./checkpoints_$MODEL" \
-    --normal # Remove this flag if you want XYZ only, keep it for XYZ+Normals
+    --normal
 
 echo "Training finished."
