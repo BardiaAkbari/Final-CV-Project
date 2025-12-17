@@ -92,27 +92,43 @@ class PointTransformerLayer(nn.Module):
         )
 
     def forward(self, xyz, features):
-        idx = knn_point(self.k, xyz, xyz)
-        knn_xyz = index_points(xyz, idx)
+        idx = knn_point(self.k, xyz, xyz)            
+        knn_xyz = index_points(xyz, idx)                
 
-        q = self.linear_q(features)
-        k = index_points(self.linear_k(features), idx)
-        v = index_points(self.linear_v(features), idx)
+        q = self.linear_q(features)                   
+        k = index_points(self.linear_k(features), idx)  
+        v = index_points(self.linear_v(features), idx)  
 
-        pos_enc = self.fc_delta(xyz[:, :, None] - knn_xyz)
+        pos_enc = self.fc_delta(xyz[:, :, None] - knn_xyz) 
 
         attn = self.fc_gamma(
             q[:, :, None] - k +
-            pos_enc.view(*pos_enc.shape[:3], self.share_planes, -1).sum(dim=3)
-        )
+            pos_enc.view(
+                pos_enc.shape[0],
+                pos_enc.shape[1],
+                pos_enc.shape[2],
+                self.share_planes,
+                -1
+            ).sum(dim=3)
+        ) 
+
         attn = F.softmax(attn, dim=-2)
 
         v = (v + pos_enc).view(
-            v.shape[0], v.shape[1], v.shape[2], self.share_planes, -1
+            v.shape[0],
+            v.shape[1],
+            v.shape[2],
+            self.share_planes,
+            -1
+        )  
+
+        out = torch.einsum(
+            "bnksa,bnka->bnsa",
+            v, attn
         )
 
-        out = torch.einsum("bnksa,bnksa->bnsa", v, attn)
         return out.reshape(out.shape[0], out.shape[1], -1)
+
 
 # ============================================================
 # Point Transformer Block
