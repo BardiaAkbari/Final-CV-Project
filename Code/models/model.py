@@ -2,9 +2,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------------
-# Pure PyTorch Helper Functions (Replaces lib.pointops)
-# ---------------------------------------------------------------------------
+# ============================================================
+# BatchNorm helpers
+# ============================================================
+
+class BatchNorm1d_P(nn.BatchNorm1d):
+    def forward(self, x):
+        return super().forward(x.transpose(1, 2)).transpose(1, 2)
+
+
+class BatchNorm2d_P(nn.BatchNorm2d):
+    def forward(self, x):
+        x = x.permute(0, 3, 1, 2)
+        x = super().forward(x)
+        return x.permute(0, 2, 3, 1)
+
+# ============================================================
+# Point cloud utility functions
+# ============================================================
+
 def square_distance(src, dst):
     B, N, _ = src.shape
     _, M, _ = dst.shape
@@ -13,147 +29,189 @@ def square_distance(src, dst):
     dist += torch.sum(dst ** 2, -1).view(B, 1, M)
     return dist
 
+
 def index_points(points, idx):
-    device = points.device
-    B = points.shape[0]
-    view_shape = list(idx.shape)
-    view_shape[1:] = [1] * (len(view_shape) - 1)
-    repeat_shape = list(idx.shape)
-    repeat_shape[0] = 1
-    batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
-    new_points = points[batch_indices, idx, :]
-    return new_points
+    raw_shape = idx.shape
+    idx = idx.reshape(raw_shape[0], -1)
+    res = torch.gather(points, 1, idx[..., None].expand(-1, -1, points.shape[-1]))
+    return res.reshape(*raw_shape, -1)
+
 
 def farthest_point_sample(xyz, npoint):
-    device = xyz.device
-    B, N, C = xyz.shape
-    centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
-    distance = torch.ones(B, N).to(device) * 1e10
-    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
-    batch_indices = torch.arange(B, dtype=torch.long).to(device)
+    B, N, _ = xyz.shape
+    centroids = torch.zeros(B, npoint, dtype=torch.long, device=xyz.device)
+    distance = torch.full((B, N), 1e10, device=xyz.device)
+    farthest = torch.randint(0, N, (B,), device=xyz.device)
+    batch_idx = torch.arange(B, device=xyz.device)
+
     for i in range(npoint):
         centroids[:, i] = farthest
-        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, -1)
+        centroid = xyz[batch_idx, farthest].view(B, 1, 3)
+        dist = torch.sum((xyz - centroid) ** 2, dim=-1)
         mask = dist < distance
         distance[mask] = dist[mask]
-        farthest = torch.max(distance, -1)[1]
+        farthest = torch.max(distance, dim=-1)[1]
+
     return centroids
 
-def knn_point(nsample, xyz, new_xyz):
-    sqrdists = square_distance(new_xyz, xyz)
-    _, group_idx = torch.topk(sqrdists, nsample, dim=-1, largest=False, sorted=False)
-    return group_idx
 
-# ---------------------------------------------------------------------------
-# Point Transformer Modules
-# ---------------------------------------------------------------------------
+def knn_point(k, xyz, new_xyz):
+    dist = square_distance(new_xyz, xyz)
+    return dist.topk(k, dim=-1, largest=False)[1]
+
+# ============================================================
+# Point Transformer Layer
+# ============================================================
 
 class PointTransformerLayer(nn.Module):
-    def __init__(self, dim, pos_mlp_hidden_dim=64, attn_mlp_hidden_mult=4, k=16):
+    def __init__(self, in_planes, out_planes, share_planes=8, nsample=16):
         super().__init__()
-        self.k = k
-        self.w_qs = nn.Linear(dim, dim, bias=False)
-        self.w_ks = nn.Linear(dim, dim, bias=False)
-        self.w_vs = nn.Linear(dim, dim, bias=False)
-        
-        self.pos_encoder = nn.Sequential(
-            nn.Linear(3, pos_mlp_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(pos_mlp_hidden_dim, dim)
-        )
-        
-        self.attn_mlp = nn.Sequential(
-            nn.Linear(dim, dim * attn_mlp_hidden_mult),
-            nn.ReLU(),
-            nn.Linear(dim * attn_mlp_hidden_mult, dim)
-        )
-        
-        self.linear_final = nn.Linear(dim, dim)
+        self.share_planes = share_planes
+        self.mid_planes = out_planes
+        self.attn_planes = out_planes // share_planes
+        self.k = nsample
 
-    def forward(self, xyz, feature):
-        dists = square_distance(xyz, xyz)
-        knn_idx = dists.argsort()[:, :, :self.k] 
-        knn_xyz = index_points(xyz, knn_idx)
-        
-        q = self.w_qs(feature).unsqueeze(2)
-        k = index_points(self.w_ks(feature), knn_idx)
-        v = index_points(self.w_vs(feature), knn_idx)
-        
-        pos_enc = self.pos_encoder(xyz.unsqueeze(2) - knn_xyz)
-        
-        attn = self.attn_mlp(q - k + pos_enc) 
-        attn = F.softmax(attn / torch.sqrt(torch.tensor(k.shape[-1], dtype=torch.float32)), dim=-2)
-        
-        new_feature = torch.einsum('bmnf,bmnf->bmf', attn, v + pos_enc)
-        new_feature = self.linear_final(new_feature) + feature
-        return new_feature
+        self.linear_q = nn.Linear(in_planes, self.mid_planes)
+        self.linear_k = nn.Linear(in_planes, self.mid_planes)
+        self.linear_v = nn.Linear(in_planes, out_planes)
+
+        self.fc_delta = nn.Sequential(
+            nn.Linear(3, 3),
+            BatchNorm2d_P(3),
+            nn.ReLU(inplace=True),
+            nn.Linear(3, out_planes)
+        )
+
+        self.fc_gamma = nn.Sequential(
+            BatchNorm2d_P(self.mid_planes),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.mid_planes, self.attn_planes),
+            BatchNorm2d_P(self.attn_planes),
+            nn.ReLU(inplace=True),
+            nn.Linear(self.attn_planes, self.attn_planes)
+        )
+
+    def forward(self, xyz, features):
+        idx = knn_point(self.k, xyz, xyz)
+        knn_xyz = index_points(xyz, idx)
+
+        q = self.linear_q(features)
+        k = index_points(self.linear_k(features), idx)
+        v = index_points(self.linear_v(features), idx)
+
+        pos_enc = self.fc_delta(xyz[:, :, None] - knn_xyz)
+
+        attn = self.fc_gamma(
+            q[:, :, None] - k +
+            pos_enc.view(*pos_enc.shape[:3], self.share_planes, -1).sum(dim=3)
+        )
+        attn = F.softmax(attn, dim=-2)
+
+        v = (v + pos_enc).view(
+            v.shape[0], v.shape[1], v.shape[2], self.share_planes, -1
+        )
+
+        out = torch.einsum("bnksa,bnksa->bnsa", v, attn)
+        return out.reshape(out.shape[0], out.shape[1], -1)
+
+# ============================================================
+# Point Transformer Block
+# ============================================================
 
 class PointTransformerBlock(nn.Module):
-    def __init__(self, c, k=16):
+    def __init__(self, in_planes, planes, share_planes=8, nsample=16):
         super().__init__()
-        self.layer = PointTransformerLayer(c, k=k)
-        
-    def forward(self, xyz, feature):
-        return self.layer(xyz, feature)
+
+        self.linear1 = nn.Linear(in_planes, planes, bias=False)
+        self.bn1 = BatchNorm1d_P(planes)
+
+        self.transformer = PointTransformerLayer(
+            planes, planes, share_planes, nsample
+        )
+        self.bn2 = BatchNorm1d_P(planes)
+
+        self.linear3 = nn.Linear(planes, planes, bias=False)
+        self.bn3 = BatchNorm1d_P(planes)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, px):
+        xyz, features = px
+        identity = features
+
+        features = self.relu(self.bn1(self.linear1(features)))
+        features = self.relu(self.bn2(self.transformer(xyz, features)))
+        features = self.bn3(self.linear3(features))
+        features = self.relu(features + identity)
+
+        return [xyz, features]
+
+# ============================================================
+# Transition Down
+# ============================================================
 
 class TransitionDown(nn.Module):
     def __init__(self, in_planes, out_planes, stride=1, nsample=16):
         super().__init__()
         self.stride = stride
         self.nsample = nsample
-        
-        # Flattened MLP approach to avoid view errors
-        self.mlp = nn.Sequential(
-            nn.Linear(in_planes, out_planes, bias=False),
-            nn.BatchNorm1d(out_planes),
-            nn.ReLU(inplace=True)
+
+        if stride != 1:
+            self.linear = nn.Linear(in_planes + 3, out_planes, bias=False)
+            self.bn = BatchNorm2d_P(out_planes)
+        else:
+            self.linear = nn.Linear(in_planes, out_planes, bias=False)
+            self.bn = BatchNorm1d_P(out_planes)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, px):
+        xyz, features = px
+
+        if self.stride == 1:
+            features = self.relu(self.bn(self.linear(features)))
+            return [xyz, features]
+
+        npoint = xyz.shape[1] // self.stride
+        fps_idx = farthest_point_sample(xyz, npoint)
+        new_xyz = index_points(xyz, fps_idx)
+
+        idx = knn_point(self.nsample, xyz, new_xyz)
+        grouped_xyz = index_points(xyz, idx)
+        grouped_xyz_norm = grouped_xyz - new_xyz[:, :, None]
+
+        grouped_features = index_points(features, idx)
+        grouped_features = torch.cat(
+            [grouped_xyz_norm, grouped_features], dim=-1
         )
 
-    def forward(self, xyz, feature, npoint):
-        # 1. Sampling
-        if self.stride > 1:
-            new_xyz_idx = farthest_point_sample(xyz, npoint)
-            new_xyz = index_points(xyz, new_xyz_idx)
-        else:
-            new_xyz = xyz
-            npoint = xyz.shape[1]
-        
-        # 2. Grouping
-        idx = knn_point(self.nsample, xyz, new_xyz)
-        grouped_feature = index_points(feature, idx) # (B, N_new, K, C)
-        
-        # 3. MLP (Flatten -> Apply -> Reshape)
-        B, N_new, K, C = grouped_feature.shape
-        grouped_feature = grouped_feature.reshape(B * N_new * K, C)
-        grouped_feature = self.mlp(grouped_feature)
-        grouped_feature = grouped_feature.reshape(B, N_new, K, -1)
-        
-        # 4. Pooling
-        new_feature = torch.max(grouped_feature, dim=2)[0] 
-        
-        return new_xyz, new_feature
+        grouped_features = self.relu(self.bn(self.linear(grouped_features)))
+        new_features = grouped_features.max(dim=2)[0]
+
+        return [new_xyz, new_features]
+
+# ============================================================
+# Point Transformer Classification Network
+# ============================================================
 
 class PointTransformerCls(nn.Module):
     def __init__(self, blocks, in_channels=6, num_classes=40):
         super().__init__()
         self.in_channels = in_channels
-        
-        # Architecture Config matching your request [1, 2, 2, 2, 2]
-        self.planes = [32, 64, 128, 256, 512]
-        self.nsample = [8, 16, 16, 16, 16]
-        # Number of points at each stage (approx downsampling)
-        # N, N/4, N/16, N/64, N/256
-        self.npoints = [1024, 256, 64, 16, 4] 
-        
-        self.enc1 = self._make_enc(self.in_channels, self.planes[0], blocks[0], self.nsample[0], self.npoints[0])
-        self.enc2 = self._make_enc(self.planes[0], self.planes[1], blocks[1], self.nsample[1], self.npoints[1])
-        self.enc3 = self._make_enc(self.planes[1], self.planes[2], blocks[2], self.nsample[2], self.npoints[2])
-        self.enc4 = self._make_enc(self.planes[2], self.planes[3], blocks[3], self.nsample[3], self.npoints[3])
-        self.enc5 = self._make_enc(self.planes[3], self.planes[4], blocks[4], self.nsample[4], self.npoints[4])
+        self.in_planes = in_channels
+        planes = [32, 64, 128, 256, 512]
+        share_planes = 8
+        stride = [1, 4, 4, 4, 4]
+        nsample = [8, 16, 16, 16, 16]
+
+        self.enc1 = self._make_enc(planes[0], blocks[0], share_planes, stride[0], nsample[0])
+        self.enc2 = self._make_enc(planes[1], blocks[1], share_planes, stride[1], nsample[1])
+        self.enc3 = self._make_enc(planes[2], blocks[2], share_planes, stride[2], nsample[2])
+        self.enc4 = self._make_enc(planes[3], blocks[3], share_planes, stride[3], nsample[3])
+        self.enc5 = self._make_enc(planes[4], blocks[4], share_planes, stride[4], nsample[4])
 
         self.cls = nn.Sequential(
-            nn.Linear(self.planes[4], 256),
+            nn.Linear(planes[4], 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
@@ -164,54 +222,40 @@ class PointTransformerCls(nn.Module):
             nn.Linear(128, num_classes)
         )
 
-    def _make_enc(self, in_planes, out_planes, blocks, nsample, npoint):
-        layers = []
-        # Transition Down (Standard stride logic handled by npoint passed to forward)
-        # Note: We calculate stride dynamically based on npoint
-        stride = 1 # Initial definition, logic handled in TransitionDown wrapper
-        layers.append(TransitionDown(in_planes, out_planes, stride, nsample))
-        
-        # Transformer Blocks
+    def _make_enc(self, planes, blocks, share_planes, stride, nsample):
+        layers = [TransitionDown(self.in_planes, planes, stride, nsample)]
+        self.in_planes = planes
         for _ in range(blocks):
-            layers.append(PointTransformerBlock(out_planes, nsample))
-        return nn.ModuleList(layers)
+            layers.append(
+                PointTransformerBlock(self.in_planes, self.in_planes, share_planes, nsample)
+            )
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        # x: (B, N, C_in)
         xyz = x[..., :3].contiguous()
-        
-        # If input is XYZ only
-        if self.in_channels == 3:
-            features = xyz
-        else:
-            features = x
-            
-        # Encoder 1
-        xyz, features = self.enc1[0](xyz, features, npoint=self.npoints[0]) # TD
-        for layer in self.enc1[1:]: features = layer(xyz, features)
-            
-        # Encoder 2
-        xyz, features = self.enc2[0](xyz, features, npoint=self.npoints[1]) # TD
-        for layer in self.enc2[1:]: features = layer(xyz, features)
 
-        # Encoder 3
-        xyz, features = self.enc3[0](xyz, features, npoint=self.npoints[2]) # TD
-        for layer in self.enc3[1:]: features = layer(xyz, features)
-        
-        # Encoder 4
-        xyz, features = self.enc4[0](xyz, features, npoint=self.npoints[3]) # TD
-        for layer in self.enc4[1:]: features = layer(xyz, features)
-        
-        # Encoder 5
-        xyz, features = self.enc5[0](xyz, features, npoint=self.npoints[4]) # TD
-        for layer in self.enc5[1:]: features = layer(xyz, features)
+        xyz1, features1 = self.enc1([xyz, x])
+        xyz2, features2 = self.enc2([xyz1, features1])
+        xyz3, features3 = self.enc3([xyz2, features2])
+        xyz4, features4 = self.enc4([xyz3, features3])
+        xyz5, features5 = self.enc5([xyz4, features4])
 
-        # Global Pooling
-        res = self.cls(features.mean(dim=1))
-        return res
+        return self.cls(features5.mean(dim=1))
 
-def point_transformer_38(num_classes=40, in_channels=6, **kwargs):
-    return PointTransformerCls([1, 2, 2, 2, 2], in_channels=in_channels, num_classes=num_classes, **kwargs)
+# ============================================================
+# Model Variants
+# ============================================================
 
-def point_transformer_50(num_classes=40, in_channels=6, **kwargs):
-    return PointTransformerCls([1, 2, 3, 5, 2], in_channels=in_channels, num_classes=num_classes, **kwargs)
+class PointTransformerCls26(PointTransformerCls):
+    def __init__(self, **kwargs):
+        super().__init__([1, 1, 1, 1, 1], **kwargs)
+
+
+class PointTransformerCls38(PointTransformerCls):
+    def __init__(self, **kwargs):
+        super().__init__([1, 2, 2, 2, 2], **kwargs)
+
+
+class PointTransformerCls50(PointTransformerCls):
+    def __init__(self, **kwargs):
+        super().__init__([1, 2, 3, 5, 2], **kwargs)
