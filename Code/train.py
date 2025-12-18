@@ -8,7 +8,7 @@ import torch.optim as optim
 from dataset import ModelNetDataLoader
 
 # 🔽 UPDATED IMPORTS (POINT TRANSFORMER CLASSES)
-from models.point_transformer import (
+from models.model import (
     PointTransformerCls38,
     PointTransformerCls50
 )
