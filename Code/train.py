@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from dataset import ModelNetDataLoader
-from models.model import point_transformer_38, point_transformer_50
+from models.model_v2 import point_transformer_38, point_transformer_50
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
