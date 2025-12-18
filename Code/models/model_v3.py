@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from lib.pointops.functions import pointops
+import pytorch_pointops as pointops
+
 
 
 # ============================================================
