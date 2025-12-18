@@ -1,116 +1,186 @@
-# pointops_pytorch.py
+# models/pytorch_pointops.py
 import torch
 
 
-def batched_index_select(x, idx):
+# ------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------
+
+def _pad_idx(idx, k):
     """
-    x: (N, C)
-    idx: (M, K)
-    return: (M, K, C)
+    idx: (M, K0), K0 <= k
+    return: (M, k)
     """
-    M, K = idx.shape
-    idx_flat = idx.reshape(-1)
-    out = x[idx_flat]
-    return out.view(M, K, -1)
+    M, K0 = idx.shape
+    if K0 == k:
+        return idx
+    pad = idx[:, :1].repeat(1, k - K0)
+    return torch.cat([idx, pad], dim=1)
 
 
-def furthest_point_sampling(x, npoint):
-    """
-    x: (N, 3)
-    npoint: int
-    return: (npoint,) indices
-    """
-    device = x.device
-    N = x.shape[0]
-    centroids = torch.zeros(npoint, dtype=torch.long, device=device)
-    distance = torch.full((N,), 1e10, device=device)
-    farthest = torch.randint(0, N, (1,), device=device).item()
-
-    for i in range(npoint):
-        centroids[i] = farthest
-        centroid = x[farthest].view(1, 3)
-        dist = torch.sum((x - centroid) ** 2, dim=1)
-        mask = dist < distance
-        distance[mask] = dist[mask]
-        farthest = torch.max(distance, dim=0)[1].item()
-
-    return centroids
+def _batch_offsets_to_ranges(offset):
+    starts = torch.cat([offset.new_zeros(1), offset[:-1]])
+    ends = offset
+    return starts.tolist(), ends.tolist()
 
 
-def furthestsampling(p, o, n_o):
+# ------------------------------------------------------------
+# Furthest Sampling (pure PyTorch)
+# ------------------------------------------------------------
+
+def furthestsampling(xyz, offset, new_offset):
     """
-    p: (N, 3)
-    o: (B,)
-    n_o: (B,)
+    xyz: (N, 3)
+    offset: (B,)
+    new_offset: (B,)
+    return: (sum(new_offset),)
     """
+    device = xyz.device
     idx_all = []
-    start_src = 0
-    start_dst = 0
 
-    for i in range(o.shape[0]):
-        end_src = o[i].item()
-        end_dst = n_o[i].item()
+    src_starts, src_ends = _batch_offsets_to_ranges(offset)
+    dst_starts, dst_ends = _batch_offsets_to_ranges(new_offset)
 
-        pts = p[start_src:end_src]
-        npoint = end_dst - start_dst
+    for s0, s1, d0, d1 in zip(src_starts, src_ends, dst_starts, dst_ends):
+        pts = xyz[s0:s1]
+        npoint = d1 - d0
 
-        fps_idx = furthest_point_sampling(pts, npoint)
-        idx_all.append(fps_idx + start_src)
+        N = pts.shape[0]
+        centroids = torch.zeros(npoint, dtype=torch.long, device=device)
+        dist = torch.full((N,), 1e10, device=device)
 
-        start_src = end_src
-        start_dst = end_dst
+        farthest = torch.randint(0, N, (1,), device=device).item()
+        for i in range(npoint):
+            centroids[i] = farthest
+            centroid = pts[farthest:farthest+1]
+            d = ((pts - centroid) ** 2).sum(-1)
+            mask = d < dist
+            dist[mask] = d[mask]
+            farthest = dist.argmax().item()
+
+        idx_all.append(centroids + s0)
 
     return torch.cat(idx_all, dim=0)
 
 
-def knn_query(k, src_p, dst_p):
+# ------------------------------------------------------------
+# KNN Query (SAFE, CUDA-equivalent)
+# ------------------------------------------------------------
+
+def knnquery(nsample, xyz, new_xyz, offset, new_offset):
     """
-    src_p: (Ns, 3)
-    dst_p: (Nd, 3)
-    return: (Nd, k) indices
+    xyz: (N, 3)
+    new_xyz: (M, 3)
+    offset: (B,)
+    new_offset: (B,)
+    return:
+        idx: (M, nsample)
+        dist: (M, nsample)
     """
-    dist = torch.cdist(dst_p, src_p)  # (Nd, Ns)
-    idx = dist.topk(k, largest=False)[1]
-    return idx
+    device = xyz.device
+    idx_all, dist_all = [], []
+
+    src_starts, src_ends = _batch_offsets_to_ranges(offset)
+    dst_starts, dst_ends = _batch_offsets_to_ranges(new_offset)
+
+    for s0, s1, d0, d1 in zip(src_starts, src_ends, dst_starts, dst_ends):
+        src = xyz[s0:s1]        # (Ns, 3)
+        dst = new_xyz[d0:d1]    # (Nd, 3)
+
+        dist = torch.cdist(dst, src)  # (Nd, Ns)
+        Ns = src.shape[0]
+
+        k = min(nsample, Ns)
+        d_k, idx_k = dist.topk(k, largest=False)
+
+        if k < nsample:
+            idx_k = _pad_idx(idx_k, nsample)
+            d_k = _pad_idx(d_k, nsample)
+
+        idx_all.append(idx_k + s0)
+        dist_all.append(d_k)
+
+    return torch.cat(idx_all, 0), torch.cat(dist_all, 0)
 
 
-def queryandgroup(nsample, src_p, dst_p, src_x, _, src_o, dst_o, use_xyz=True):
+# ------------------------------------------------------------
+# Grouping
+# ------------------------------------------------------------
+
+def grouping(input, idx):
     """
-    src_p: (Ns, 3)
-    dst_p: (Nd, 3)
-    src_x: (Ns, C) or None
+    input: (N, C)
+    idx: (M, nsample)
+    return: (M, nsample, C)
     """
-    device = src_p.device
-    grouped_feats = []
+    return input[idx.view(-1)].view(idx.shape[0], idx.shape[1], -1)
 
-    src_start = 0
-    dst_start = 0
 
-    for i in range(src_o.shape[0]):
-        src_end = src_o[i].item()
-        dst_end = dst_o[i].item()
+# ------------------------------------------------------------
+# Query and Group (USED BY YOUR MODEL)
+# ------------------------------------------------------------
 
-        sp = src_p[src_start:src_end]
-        dp = dst_p[dst_start:dst_end]
+def queryandgroup(nsample, xyz, new_xyz, feat, idx, offset, new_offset, use_xyz=True):
+    """
+    output:
+      (M, nsample, C + 3) if use_xyz
+      (M, nsample, C)     otherwise
+    """
+    if new_xyz is None:
+        new_xyz = xyz
 
-        idx = knn_query(nsample, sp, dp)  # (Nd_i, nsample)
-        idx = idx + src_start
+    if idx is None:
+        idx, _ = knnquery(nsample, xyz, new_xyz, offset, new_offset)
 
-        grouped_p = batched_index_select(src_p, idx)  # (Nd_i, nsample, 3)
-        grouped_p = grouped_p - dp.unsqueeze(1)
+    grouped_xyz = xyz[idx.view(-1)].view(idx.shape[0], nsample, 3)
+    grouped_xyz = grouped_xyz - new_xyz.unsqueeze(1)
 
-        if src_x is not None:
-            grouped_x = batched_index_select(src_x, idx)
-            if use_xyz:
-                grouped = torch.cat([grouped_p, grouped_x], dim=-1)
-            else:
-                grouped = grouped_x
+    if feat is not None:
+        grouped_feat = feat[idx.view(-1)].view(idx.shape[0], nsample, -1)
+        if use_xyz:
+            return torch.cat([grouped_xyz, grouped_feat], dim=-1)
         else:
-            grouped = grouped_p
+            return grouped_feat
+    else:
+        return grouped_xyz
 
-        grouped_feats.append(grouped)
 
-        src_start = src_end
-        dst_start = dst_end
+# ------------------------------------------------------------
+# Subtraction
+# ------------------------------------------------------------
 
-    return torch.cat(grouped_feats, dim=0)
+def subtraction(input1, input2, idx):
+    """
+    input1, input2: (N, C)
+    idx: (N, nsample)
+    return: (N, nsample, C)
+    """
+    return input1.unsqueeze(1) - input2[idx]
+
+
+# ------------------------------------------------------------
+# Aggregation
+# ------------------------------------------------------------
+
+def aggregation(input, position, weight, idx):
+    """
+    input: (N, C)
+    position: (N, nsample, C)
+    weight: (N, nsample, Cw)
+    idx: (N, nsample)
+    return: (N, C)
+    """
+    weighted = (input[idx] + position) * weight.sum(-1, keepdim=True)
+    return weighted.sum(1)
+
+
+# ------------------------------------------------------------
+# Interpolation
+# ------------------------------------------------------------
+
+def interpolation(xyz, new_xyz, feat, offset, new_offset, k=3):
+    idx, dist = knnquery(k, xyz, new_xyz, offset, new_offset)
+    dist = torch.clamp(dist, min=1e-8)
+    w = 1.0 / dist
+    w = w / w.sum(1, keepdim=True)
+    return (feat[idx] * w.unsqueeze(-1)).sum(1)
