@@ -193,7 +193,7 @@ def main():
             test_loss, test_oa, test_macc = calculate_metrics(test_loader, model, criterion, device, num_classes=40, desc=f'Epoch {epoch+1} [Test]')
             
             # --- THIS IS THE LINE I ADDED FOR YOU ---
-            logging.info(f'Epoch {epoch+1}: Train Loss {avg_train_loss:.4f} | Test Loss {test_loss:.4f} | Train OA {train_oa:.2f}% | Test OA {test_oa:.2f}%')
+            logging.info(f'Epoch {epoch+1}: Train Loss {avg_train_loss:.4f} | Test Loss {test_loss:.4f} | Train OA {train_oa:.2f}% | Test OA {test_oa:.2f}% | Train mAcc {train_macc:.2f}% | Test mAcc {test_macc:.2f}%')
             # ----------------------------------------
 
             history['train_loss'].append(avg_train_loss)
