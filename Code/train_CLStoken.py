@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from dataset import ModelNetDataLoader
 
-
+# OFFICIAL-style Point Transformer classifiers
 from models.model_CLS_token import (
     pointtransformer_cls38,
     pointtransformer_cls50
@@ -125,8 +125,6 @@ def main():
     parser.add_argument('--accum_iter', type=int, default=1)
 
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--gamma', type=float, default=0.1)
-    parser.add_argument('--decay_epoch', nargs='+', type=int, default=[70, 120])
     parser.add_argument('--val_epoch', type=int, default=1)
 
     args = parser.parse_args()
@@ -167,16 +165,31 @@ def main():
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(
-        model.parameters(),
-        lr=args.lr,
-        momentum=0.9,
-        weight_decay=args.weight_decay,
-        nesterov=True
+
+    # ============================================================
+    # AdamW optimizer with no weight decay for bias & norm params
+    # ============================================================
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.endswith('bias') or 'norm' in name.lower():
+            no_decay.append(param)
+        else:
+            decay.append(param)
+
+    optimizer = optim.AdamW(
+        [
+            {'params': decay, 'weight_decay': args.weight_decay},
+            {'params': no_decay, 'weight_decay': 0.0},
+        ],
+        lr=args.lr
     )
 
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=args.decay_epoch, gamma=args.gamma
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epoch,
+        eta_min=1e-5
     )
 
     best_oa = 0.0
@@ -197,7 +210,9 @@ def main():
     else:
         start_epoch = 0
 
-    # TRAINING LOOP
+    # ============================================================
+    # Training Loop
+    # ============================================================
     for epoch in range(start_epoch, args.epoch):
         model.train()
         total_loss = 0.0
