@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 from . import pytorch_pointops as pointops
 
-from torch_points3d.modules.KPConv.kernels import KPConvLayer
+from torch_points3d.kernels import KPConvLayer
 from torch_scatter import scatter_softmax
 from timm.models.layers import DropPath, trunc_normal_
-from torch_points3d.core.common_modules import FastBatchNorm1d
+from torch_points3d.base_modules import FastBatchNorm1d
 from torch_geometric.nn import voxel_grid
 
 def get_indice_pairs(p2v_map, counts, new_p2v_map, new_counts, downsample_idx, batch, xyz, window_size, i):
@@ -161,7 +161,7 @@ class WindowAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
-    # def forward(self, feats, xyz, index_0, index_1):
+
     def forward(self, feats, xyz, index_0, index_1, index_0_offsets, n_max):
         """ Forward function.
 
