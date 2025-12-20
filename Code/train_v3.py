@@ -138,7 +138,8 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
-
+    last_ckpt = os.path.join(args.checkpoint_dir, 'last.pth')
+    
     logging.basicConfig(
         filename=os.path.join(args.checkpoint_dir, 'log.txt'),
         level=logging.INFO,
