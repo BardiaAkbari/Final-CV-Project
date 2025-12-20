@@ -184,3 +184,55 @@ def interpolation(xyz, new_xyz, feat, offset, new_offset, k=3):
     w = 1.0 / dist
     w = w / w.sum(1, keepdim=True)
     return (feat[idx] * w.unsqueeze(-1)).sum(1)
+
+
+
+# ------------------------------------------------------------
+# Ball Query (pure PyTorch, SAFE)
+# ------------------------------------------------------------
+
+def ball_query(radius, nsample, xyz, new_xyz, offset, new_offset):
+    """
+    xyz: (N, 3)
+    new_xyz: (M, 3)
+    offset: (B,)
+    new_offset: (B,)
+    return:
+        idx: (M, nsample)
+    """
+    device = xyz.device
+    idx_all = []
+
+    src_starts, src_ends = _batch_offsets_to_ranges(offset)
+    dst_starts, dst_ends = _batch_offsets_to_ranges(new_offset)
+
+    radius2 = radius * radius
+
+    for s0, s1, d0, d1 in zip(src_starts, src_ends, dst_starts, dst_ends):
+        src = xyz[s0:s1]          # (Ns, 3)
+        dst = new_xyz[d0:d1]      # (Nd, 3)
+        Ns = src.shape[0]
+        Nd = dst.shape[0]
+
+        # squared distances: (Nd, Ns)
+        dist2 = torch.cdist(dst, src, p=2) ** 2
+
+        idx_batch = torch.zeros((Nd, nsample), dtype=torch.long, device=device)
+
+        for i in range(Nd):
+            mask = dist2[i] <= radius2
+            idx_in_ball = torch.nonzero(mask, as_tuple=False).view(-1)
+
+            if idx_in_ball.numel() == 0:
+                # no neighbors → default to first point
+                idx_batch[i].fill_(0)
+            elif idx_in_ball.numel() >= nsample:
+                idx_batch[i] = idx_in_ball[:nsample]
+            else:
+                # pad with first valid neighbor
+                pad = idx_in_ball[0].repeat(nsample - idx_in_ball.numel())
+                idx_batch[i] = torch.cat([idx_in_ball, pad], dim=0)
+
+        idx_all.append(idx_batch + s0)
+
+    return torch.cat(idx_all, dim=0)
