@@ -54,24 +54,32 @@ class ModelNetDataLoader(Dataset):
     def __len__(self):
         return len(self.datapath)
 
-    def _get_item(self, index):
-        if index in self.cache:
-            point_set, cls = self.cache[index]
+    def __getitem__(self, index):
+        fn = self.datapath[index]
+        cls = self.classes[fn[0]]
+        cls = np.array([cls]).astype(np.int32)
+        
+        # Read the point cloud
+        # The dataset is comma separated: x,y,z,nx,ny,nz
+        point_set = np.loadtxt(fn[1], delimiter=',').astype(np.float32)
+
+        if self.normal_channel:
+            point_set = point_set[:, 0:6]
         else:
-            fn = self.datapath[index]
-            cls = self.classes[self.datapath[index][0]]
-            cls = np.array([cls]).astype(np.int32)
-            # Read txt file
-            point_set = np.loadtxt(fn[1], delimiter=',').astype(np.float32)
-            
-            if self.uniform:
-                point_set = farthest_point_sample(point_set, self.npoints)
-            else:
-                point_set = point_set[0:self.npoints,:]
+            point_set = point_set[:, 0:3]
 
-            point_set[:, 0:3] = pc_normalize(point_set[:, 0:3])
+        # Resample to 1024 points
+        # Using random choice if points > 1024, or with replacement if < 1024
+        try:
+            choice = np.random.choice(len(point_set), self.npoints, replace=True)
+            point_set = point_set[choice, :]
+        except ValueError:
+            # Fallback if empty
+            point_set = np.zeros((self.npoints, 3), dtype=np.float32)
 
-            if not self.normal_channel:
-                point_set = point_set[:, 0:3]
+        # Normalize
+        point_set[:, 0:3] = pc_normalize(point_set[:, 0:3])
+
+        return point_set, cls
 
             
