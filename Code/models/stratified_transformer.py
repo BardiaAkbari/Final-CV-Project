@@ -161,7 +161,7 @@ class WindowAttention(nn.Module):
 
         self.softmax = nn.Softmax(dim=-1)
 
-    # def forward(self, feats, xyz, index_0, index_1):
+
     def forward(self, feats, xyz, index_0, index_1, index_0_offsets, n_max):
         """ Forward function.
 
