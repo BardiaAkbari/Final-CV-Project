@@ -201,7 +201,7 @@ def main():
 
     last_ckpt = os.path.join(args.checkpoint_dir, 'last.pth')
     if os.path.exists(last_ckpt):
-        ckpt = torch.load(last_ckpt)
+        ckpt = torch.load(last_ckpt, weights_only=False)
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         best_oa = ckpt['best_oa']
