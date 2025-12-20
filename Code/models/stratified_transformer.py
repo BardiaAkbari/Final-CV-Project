@@ -2,9 +2,8 @@ import torch
 import torch.nn as nn
 from . import pytorch_pointops as pointops
 
-from .torch_points3d.kernels import KPConvLayer
-from .torch_points3d.base_modules import FastBatchNorm1d
-
+from ..torch_points3d.modules.KPConv.kernels import KPConvLayer
+from ..torch_points3d.core.common_modules.base_modules import FastBatchNorm1d
 from torch_scatter import scatter_softmax
 from timm.models.layers import DropPath, trunc_normal_
 from torch_geometric.nn import voxel_grid
