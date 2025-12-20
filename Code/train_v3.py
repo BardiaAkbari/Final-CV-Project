@@ -128,7 +128,13 @@ def main():
     parser.add_argument('--gamma', type=float, default=0.1)
     parser.add_argument('--decay_epoch', nargs='+', type=int, default=[70, 120])
     parser.add_argument('--val_epoch', type=int, default=1)
-
+    parser.add_argument(
+    '--resume_ckpt',
+    type=str,
+    default=None,
+    help='Path to checkpoint (.pth) to resume training from'
+    )
+    
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -185,17 +191,34 @@ def main():
         'train_oa': [], 'test_oa': [],
         'train_macc': [], 'test_macc': []
     }
+    
+    start_epoch = 0
+    best_oa = 0.0
 
-    last_ckpt = os.path.join(args.checkpoint_dir, 'last.pth')
-    if os.path.exists(last_ckpt):
-        ckpt = torch.load(last_ckpt)
+    # Priority:
+    # 1) --resume_ckpt
+    # 2) checkpoint_dir/last.pth
+    ckpt_path = None
+
+    if args.resume_ckpt is not None:
+        ckpt_path = args.resume_ckpt
+    elif os.path.exists(os.path.join(args.checkpoint_dir, 'last.pth')):
+        ckpt_path = os.path.join(args.checkpoint_dir, 'last.pth')
+
+    if ckpt_path is not None:
+        logging.info(f"🔄 Resuming from checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        best_oa = ckpt['best_oa']
-        history = ckpt['history']
+
+        best_oa = ckpt.get('best_oa', 0.0)
+        history = ckpt.get('history', history)
         start_epoch = ckpt['epoch'] + 1
+
+        logging.info(f"➡️ Resumed at epoch {start_epoch}, best OA = {best_oa:.2f}%")
     else:
-        start_epoch = 0
+        logging.info("🆕 No checkpoint found. Training from scratch.")
 
     # TRAINING LOOP
     for epoch in range(start_epoch, args.epoch):

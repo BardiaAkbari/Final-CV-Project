@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.optim as optim
 from dataset import ModelNetDataLoader
 
-# 🔽 UPDATED IMPORTS (POINT TRANSFORMER CLASSES)
 from models.model import (
     PointTransformerCls38,
     PointTransformerCls50
@@ -16,10 +15,6 @@ from models.model import (
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
-
-# ============================================================
-# Plot Training History
-# ============================================================
 
 def plot_history(history, save_path):
     epochs = range(1, len(history['train_loss']) + 1)
@@ -54,10 +49,6 @@ def plot_history(history, save_path):
     plt.savefig(os.path.join(save_path, 'training_plot.png'))
     plt.close()
 
-
-# ============================================================
-# Evaluation Metrics
-# ============================================================
 
 def calculate_metrics(loader, model, criterion, device, num_classes=40, desc="Eval"):
     loss_accum = 0.0
@@ -95,10 +86,6 @@ def calculate_metrics(loader, model, criterion, device, num_classes=40, desc="Ev
     macc = np.mean(class_acc)
     return avg_loss, oa, macc
 
-
-# ============================================================
-# Main Training Script
-# ============================================================
 
 def main():
     parser = argparse.ArgumentParser()

@@ -11,13 +11,7 @@ def pc_normalize(pc):
     return pc
 
 def farthest_point_sample(point, npoint):
-    """
-    Input:
-        point: pointcloud data, [N, D]
-        npoint: number of samples
-    Return:
-        centroids: sampled pointcloud index, [npoint, D]
-    """
+    
     N, D = point.shape
     xyz = point[:,:3]
     centroids = np.zeros((npoint,))
@@ -80,10 +74,4 @@ class ModelNetDataLoader(Dataset):
             if not self.normal_channel:
                 point_set = point_set[:, 0:3]
 
-            if len(self.cache) < self.cache_size:
-                self.cache[index] = (point_set, cls)
-
-        return point_set, cls
-
-    def __getitem__(self, index):
-        return self._get_item(index)
+            
