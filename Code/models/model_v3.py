@@ -4,11 +4,6 @@ from . import pytorch_pointops as pointops
 
 
 
-
-# ============================================================
-# Point Transformer Layer (UNCHANGED)
-# ============================================================
-
 class PointTransformerLayer(nn.Module):
     def __init__(self, in_planes, out_planes, share_planes=8, nsample=16):
         super().__init__()
@@ -40,7 +35,7 @@ class PointTransformerLayer(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, pxo):
-        p, x, o = pxo  # (n,3), (n,c), (b)
+        p, x, o = pxo  
 
         x_q = self.linear_q(x)
         x_k = self.linear_k(x)
@@ -82,9 +77,6 @@ class PointTransformerLayer(nn.Module):
         return x.view(n, c)
 
 
-# ============================================================
-# Transition Down (UNCHANGED)
-# ============================================================
 
 class TransitionDown(nn.Module):
     def __init__(self, in_planes, out_planes, stride=1, nsample=16):
@@ -128,9 +120,6 @@ class TransitionDown(nn.Module):
         return [p, x, o]
 
 
-# ============================================================
-# Point Transformer Block (UNCHANGED)
-# ============================================================
 
 class PointTransformerBlock(nn.Module):
     expansion = 1
@@ -163,9 +152,6 @@ class PointTransformerBlock(nn.Module):
         return [p, x, o]
 
 
-# ============================================================
-# Point Transformer Classification Network
-# ============================================================
 
 class PointTransformerCls(nn.Module):
     def __init__(self, blocks, c=6, num_classes=40):
@@ -212,7 +198,6 @@ class PointTransformerCls(nn.Module):
         p, x, o = self.enc4([p, x, o])
         p, x, o = self.enc5([p, x, o])
 
-        # Global average pooling per batch
         feats = []
         for i in range(o.shape[0]):
             s = 0 if i == 0 else o[i-1]
@@ -223,9 +208,6 @@ class PointTransformerCls(nn.Module):
         return self.cls_head(x)
 
 
-# ============================================================
-# Model Variants
-# ============================================================
 
 def pointtransformer_cls26(**kwargs):
     return PointTransformerCls([1, 1, 1, 1, 1], **kwargs)

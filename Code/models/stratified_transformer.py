@@ -418,7 +418,7 @@ class Stratified(nn.Module):
             drop_path=dpr[sum(depths[:i]):sum(depths[:i+1])], downsample=TransitionDown if i < num_layers-1 else None, \
             ratio=ratio, k=k, out_channels=channels[i+1] if i < num_layers-1 else None) for i in range(self.layer_start, num_layers)])
 
-        self.upsamples = nn.ModuleList([Upsample(up_k, channels[i], channels[i-1]) for i in range(num_layers-1, 0, -1)])
+        # self.upsamples = nn.ModuleList([Upsample(up_k, channels[i], channels[i-1]) for i in range(num_layers-1, 0, -1)])
         
         self.classifier = nn.Sequential(
             nn.Linear(channels[0], channels[0]), 
