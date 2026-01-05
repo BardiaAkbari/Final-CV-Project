@@ -21,15 +21,15 @@ class PointTransformerLayer(nn.Module):
         self.softmax = nn.Softmax(dim=1)
         
     def forward(self, pxo) -> torch.Tensor:
-        p, x, o = pxo  # (n, 3), (n, c), (b)
-        x_q, x_k, x_v = self.linear_q(x), self.linear_k(x), self.linear_v(x)  # (n, c)
-        x_k = pointops.queryandgroup(self.nsample, p, p, x_k, None, o, o, use_xyz=True)  # (n, nsample, 3+c)
-        x_v = pointops.queryandgroup(self.nsample, p, p, x_v, None, o, o, use_xyz=False)  # (n, nsample, c)
+        p, x, o = pxo 
+        x_q, x_k, x_v = self.linear_q(x), self.linear_k(x), self.linear_v(x) 
+        x_k = pointops.queryandgroup(self.nsample, p, p, x_k, None, o, o, use_xyz=True)  
+        x_v = pointops.queryandgroup(self.nsample, p, p, x_v, None, o, o, use_xyz=False)
         p_r, x_k = x_k[:, :, 0:3], x_k[:, :, 3:]
-        for i, layer in enumerate(self.linear_p): p_r = layer(p_r.transpose(1, 2).contiguous()).transpose(1, 2).contiguous() if i == 1 else layer(p_r)    # (n, nsample, c)
-        w = x_k - x_q.unsqueeze(1) + p_r.view(p_r.shape[0], p_r.shape[1], self.out_planes // self.mid_planes, self.mid_planes).sum(2)  # (n, nsample, c)
+        for i, layer in enumerate(self.linear_p): p_r = layer(p_r.transpose(1, 2).contiguous()).transpose(1, 2).contiguous() if i == 1 else layer(p_r)   
+        w = x_k - x_q.unsqueeze(1) + p_r.view(p_r.shape[0], p_r.shape[1], self.out_planes // self.mid_planes, self.mid_planes).sum(2) 
         for i, layer in enumerate(self.linear_w): w = layer(w.transpose(1, 2).contiguous()).transpose(1, 2).contiguous() if i % 3 == 0 else layer(w)
-        w = self.softmax(w)  # (n, nsample, c)
+        w = self.softmax(w)
         n, nsample, c = x_v.shape; s = self.share_planes
         x = ((x_v + p_r).view(n, nsample, s, c // s) * w.unsqueeze(2)).sum(1).view(n, c)
         return x
@@ -48,21 +48,21 @@ class TransitionDown(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         
     def forward(self, pxo):
-        p, x, o = pxo  # (n, 3), (n, c), (b)
+        p, x, o = pxo  
         if self.stride != 1:
             n_o, count = [o[0].item() // self.stride], o[0].item() // self.stride
             for i in range(1, o.shape[0]):
                 count += (o[i].item() - o[i-1].item()) // self.stride
                 n_o.append(count)
             n_o = torch.cuda.IntTensor(n_o)
-            idx = pointops.furthestsampling(p, o, n_o)  # (m)
-            n_p = p[idx.long(), :]  # (m, 3)
-            x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  # (m, 3+c, nsample)
-            x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  # (m, c, nsample)
-            x = self.pool(x).squeeze(-1)  # (m, c)
+            idx = pointops.furthestsampling(p, o, n_o) 
+            n_p = p[idx.long(), :]  
+            x = pointops.queryandgroup(self.nsample, p, n_p, x, None, o, n_o, use_xyz=True)  
+            x = self.relu(self.bn(self.linear(x).transpose(1, 2).contiguous()))  
+            x = self.pool(x).squeeze(-1)
             p, o = n_p, n_o
         else:
-            x = self.relu(self.bn(self.linear(x)))  # (n, c)
+            x = self.relu(self.bn(self.linear(x)))  
         return [p, x, o]
 
 
@@ -78,7 +78,7 @@ class TransitionUp(nn.Module):
         
     def forward(self, pxo1, pxo2=None):
         if pxo2 is None:
-            _, x, o = pxo1  # (n, 3), (n, c), (b)
+            _, x, o = pxo1 
             x_tmp = []
             for i in range(o.shape[0]):
                 if i == 0:
@@ -110,7 +110,7 @@ class PointTransformerBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, pxo):
-        p, x, o = pxo  # (n, 3), (n, c), (b)
+        p, x, o = pxo 
         identity = x
         x = self.relu(self.bn1(self.linear1(x)))
         x = self.relu(self.bn2(self.transformer2([p, x, o])))
@@ -120,23 +120,23 @@ class PointTransformerBlock(nn.Module):
         return [p, x, o]
 
 
-class PointTransformerSeg(nn.Module):
+class BGAPointTransformer(nn.Module):
     def __init__(self, block, blocks, c=6, k=13, num_classes=40):
         super().__init__()
         self.c = c
         self.in_planes, planes = c, [32, 64, 128, 256, 512]
         fpn_planes, fpnhead_planes, share_planes = 128, 64, 8
         stride, nsample = [1, 4, 4, 4, 4], [8, 16, 16, 16, 16]
-        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  # N/1
-        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1])  # N/4
-        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  # N/16
-        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3])  # N/64
-        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4])  # N/256
-        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)  # transform p5
-        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3])  # fusion p5 and p4
-        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2])  # fusion p4 and p3
-        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1])  # fusion p3 and p2
-        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0])  # fusion p2 and p1
+        self.enc1 = self._make_enc(block, planes[0], blocks[0], share_planes, stride=stride[0], nsample=nsample[0])  
+        self.enc2 = self._make_enc(block, planes[1], blocks[1], share_planes, stride=stride[1], nsample=nsample[1]) 
+        self.enc3 = self._make_enc(block, planes[2], blocks[2], share_planes, stride=stride[2], nsample=nsample[2])  
+        self.enc4 = self._make_enc(block, planes[3], blocks[3], share_planes, stride=stride[3], nsample=nsample[3]) 
+        self.enc5 = self._make_enc(block, planes[4], blocks[4], share_planes, stride=stride[4], nsample=nsample[4]) 
+        self.dec5 = self._make_dec(block, planes[4], 2, share_planes, nsample=nsample[4], is_head=True)  
+        self.dec4 = self._make_dec(block, planes[3], 2, share_planes, nsample=nsample[3]) 
+        self.dec3 = self._make_dec(block, planes[2], 2, share_planes, nsample=nsample[2]) 
+        self.dec2 = self._make_dec(block, planes[1], 2, share_planes, nsample=nsample[1]) 
+        self.dec1 = self._make_dec(block, planes[0], 2, share_planes, nsample=nsample[0]) 
         self.cls = nn.Sequential(nn.Linear(planes[0], planes[0]), nn.BatchNorm1d(planes[0]), nn.ReLU(inplace=True), nn.Linear(planes[0], k))
 
         self.cls_head = nn.Sequential(
@@ -164,33 +164,40 @@ class PointTransformerSeg(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, pxo):
-        p0, x0, o0 = pxo  # (n, 3), (n, c), (b)
+        p0, x0, o0 = pxo  
         x0 = p0 if self.c == 3 else torch.cat((p0, x0), 1)
+
         p1, x1, o1 = self.enc1([p0, x0, o0])
         p2, x2, o2 = self.enc2([p1, x1, o1])
         p3, x3, o3 = self.enc3([p2, x2, o2])
         p4, x4, o4 = self.enc4([p3, x3, o3])
         p5, x5, o5 = self.enc5([p4, x4, o4])
-        x5 = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
-        x4 = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5, o5]), o4])[1]
-        x3 = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4, o4]), o3])[1]
-        x2 = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3, o3]), o2])[1]
-        x1 = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2, o2]), o1])[1]
-        segmentation = self.cls(x1)
 
         feats = []
         for i in range(o5.shape[0]):
             s = 0 if i == 0 else o5[i-1]
             e = o5[i]
-            feats.append(x5[s:e].mean(0, keepdim=True))
+            feats.append(x5[s:e].mean(0, keepdim=True)) 
+        
         avg = torch.cat(feats, 0)
-
         classification = self.cls_head(avg)
+
+        
+        x5_dec = self.dec5[1:]([p5, self.dec5[0]([p5, x5, o5]), o5])[1]
+
+        x4_dec = self.dec4[1:]([p4, self.dec4[0]([p4, x4, o4], [p5, x5_dec, o5]), o4])[1]
+
+        x3_dec = self.dec3[1:]([p3, self.dec3[0]([p3, x3, o3], [p4, x4_dec, o4]), o3])[1]
+
+        x2_dec = self.dec2[1:]([p2, self.dec2[0]([p2, x2, o2], [p3, x3_dec, o3]), o2])[1]
+
+        x1_dec = self.dec1[1:]([p1, self.dec1[0]([p1, x1, o1], [p2, x2_dec, o2]), o1])[1]
+
+        segmentation = self.cls(x1_dec) 
 
         return segmentation, classification
 
 
-
 def pointtransformer_seg_repro(**kwargs):
-    model = PointTransformerSeg(PointTransformerBlock, [2, 3, 4, 6, 3], **kwargs)
+    model = BGAPointTransformer(PointTransformerBlock, [2, 3, 4, 6, 3], **kwargs)
     return model

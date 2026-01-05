@@ -8,10 +8,10 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from dataset import ModelNetDataLoader
-from models.stratified_transformer import StratifiedCls
+from .dataset import ModelNetDataLoader
+from .models.stratified_transformer import Stratified
 
-from models.pytorch_pointops import ball_query
+from .models.pytorch_pointops import ball_query
 
 
 # ============================================================
